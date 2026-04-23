@@ -21,6 +21,21 @@ class Annotation:
     text: str
 
 
+def _get_example_entities(example: Dict, default_entity_type: Optional[str] = None) -> Tuple[List[str], List[int], List[int]]:
+    if all(key in example for key in ("entity_types", "entity_start_chars", "entity_end_chars")):
+        return example["entity_types"], example["entity_start_chars"], example["entity_end_chars"]
+
+    if "label" in example:
+        label_spans = example["label"]
+        entity_type = default_entity_type or "TERM"
+        entity_types = [entity_type for _ in label_spans]
+        entity_start_chars = [span[0] for span in label_spans]
+        entity_end_chars = [span[1] for span in label_spans]
+        return entity_types, entity_start_chars, entity_end_chars
+
+    return [], [], []
+
+
 def compute_tp_fn_fp(predictions: Set, labels: Set, **kwargs) -> Dict[str, float]:
     # tp, fn, fp
     if len(predictions) == 0:
@@ -120,6 +135,7 @@ def postprocess_nested_predictions(
     metrics_by_type = {entity_type: {"tp": 0, "fn": 0, "fp": 0} for entity_type in entity_type_vocab + ["all"]}
     start_metrics_by_type = {entity_type: {"tp": 0, "fn": 0, "fp": 0} for entity_type in entity_type_vocab + ["all"]}
     end_metrics_by_type = {entity_type: {"tp": 0, "fn": 0, "fp": 0} for entity_type in entity_type_vocab + ["all"]}
+    default_entity_type = id_to_type[0] if len(id_to_type) > 0 else "TERM"
 
     if neutral_relative_threshold is not None:
         ner_logits = collections.defaultdict(float)
@@ -139,8 +155,8 @@ def postprocess_nested_predictions(
             nonzero_predictions = set()
         
         # Looping through all NER annotations.
-        for entity_type, start_char, end_char in zip(
-            example["entity_types"], example["entity_start_chars"], example["entity_end_chars"]):
+        entity_types, entity_start_chars, entity_end_chars = _get_example_entities(example, default_entity_type)
+        for entity_type, start_char, end_char in zip(entity_types, entity_start_chars, entity_end_chars):
             entity_type_count["all"] += 1
             entity_type_count[entity_type] += 1
             example_annotations.add(Annotation(
@@ -176,6 +192,10 @@ def postprocess_nested_predictions(
                 span_logits = span_logits[:, :common_len, :common_len]
                 token_start_mask = token_start_mask[:common_len]
                 token_end_mask = token_end_mask[:common_len]
+            candidate_span_mask = None
+            if "candidate_span_mask" in features[feature_index]:
+                candidate_span_mask = np.array(features[feature_index]["candidate_span_mask"]).astype(bool)
+                candidate_span_mask = candidate_span_mask[:span_logits.shape[1], :span_logits.shape[2]]
 
             ### Two thresholds for flat2nested. Upper and lower one. Upper: positive vs others, lower: neutral vs negative. 
 
@@ -189,19 +209,22 @@ def postprocess_nested_predictions(
 
                 span_all = np.triu(span_logits > 0)
 
-            type_ids, start_indexes, end_indexes = (
-                token_start_mask[np.newaxis, :, np.newaxis] & token_end_mask[np.newaxis, np.newaxis, :] & span_preds
-            ).nonzero()
+            valid_span_mask = token_start_mask[np.newaxis, :, np.newaxis] & token_end_mask[np.newaxis, np.newaxis, :] & span_preds
+            if candidate_span_mask is not None:
+                valid_span_mask = valid_span_mask & candidate_span_mask[np.newaxis, :, :]
+            type_ids, start_indexes, end_indexes = valid_span_mask.nonzero()
 
             if neutral_relative_threshold is not None:
-                neutral_type_ids, neutral_start_indexes, neutral_end_indexes = (
-                    token_start_mask[np.newaxis, :, np.newaxis] & token_end_mask[np.newaxis, np.newaxis, :] & span_neutrals
-                ).nonzero()
+                neutral_span_mask = token_start_mask[np.newaxis, :, np.newaxis] & token_end_mask[np.newaxis, np.newaxis, :] & span_neutrals
+                if candidate_span_mask is not None:
+                    neutral_span_mask = neutral_span_mask & candidate_span_mask[np.newaxis, :, :]
+                neutral_type_ids, neutral_start_indexes, neutral_end_indexes = neutral_span_mask.nonzero()
                 # neutral_data = (example["id"], span_neutrals)
 
-                all_type_ids, all_start_indexes, all_end_indexes = (
-                    token_start_mask[np.newaxis, :, np.newaxis] & token_end_mask[np.newaxis, np.newaxis, :] & span_all
-                ).nonzero()
+                all_span_mask = token_start_mask[np.newaxis, :, np.newaxis] & token_end_mask[np.newaxis, np.newaxis, :] & span_all
+                if candidate_span_mask is not None:
+                    all_span_mask = all_span_mask & candidate_span_mask[np.newaxis, :, :]
+                all_type_ids, all_start_indexes, all_end_indexes = all_span_mask.nonzero()
 
             # This is what will allow us to map some the positions in our logits to span of texts in the original context.
             offset_mapping = features[feature_index]["offset_mapping"]
@@ -435,20 +458,21 @@ def postprocess_nested_predictions(
         predictions_to_save = []
         for example in examples:
             example = copy.deepcopy(example)
-            example.pop("word_start_chars")
-            example.pop("word_end_chars")
+            example.pop("word_start_chars", None)
+            example.pop("word_end_chars", None)
             gold_ner = set()
-            for entity_type, start_char, end_char in zip(
-                example["entity_types"], example["entity_start_chars"], example["entity_end_chars"]):
+            entity_types, entity_start_chars, entity_end_chars = _get_example_entities(example, default_entity_type)
+            for entity_type, start_char, end_char in zip(entity_types, entity_start_chars, entity_end_chars):
                 gold_ner.add((start_char, end_char, entity_type, example["text"][start_char:end_char]))
-            example.pop("entity_types")
-            example.pop("entity_start_chars")
-            example.pop("entity_end_chars")
+            example.pop("entity_types", None)
+            example.pop("entity_start_chars", None)
+            example.pop("entity_end_chars", None)
+            example.pop("label", None)
 
             pred_ner = example_id_to_predictions.get(example["id"], set())
             example["gold_ner"] = sorted(gold_ner)
             example["pred_ner"] = sorted(pred_ner)
-            predictions_to_save.append(example)        
+            predictions_to_save.append(example)
 
         prediction_file = os.path.join(
             output_dir, "predictions.json" if prefix is None else f"{prefix}_predictions.json"
@@ -463,15 +487,16 @@ def postprocess_nested_predictions(
             neutrals_to_save = []
             for example in examples:
                 example = copy.deepcopy(example)
-                example.pop("word_start_chars")
-                example.pop("word_end_chars")
+                example.pop("word_start_chars", None)
+                example.pop("word_end_chars", None)
                 gold_ner = set()
-                for entity_type, start_char, end_char in zip(
-                    example["entity_types"], example["entity_start_chars"], example["entity_end_chars"]):
+                entity_types, entity_start_chars, entity_end_chars = _get_example_entities(example, default_entity_type)
+                for entity_type, start_char, end_char in zip(entity_types, entity_start_chars, entity_end_chars):
                     gold_ner.add((start_char, end_char, entity_type, example["text"][start_char:end_char]))
-                example.pop("entity_types")
-                example.pop("entity_start_chars")
-                example.pop("entity_end_chars")
+                example.pop("entity_types", None)
+                example.pop("entity_start_chars", None)
+                example.pop("entity_end_chars", None)
+                example.pop("label", None)
 
                 pred_ner = example_id_to_neutral_predictions.get(example["id"], set())
                 example["gold_ner"] = sorted(gold_ner)
@@ -491,15 +516,16 @@ def postprocess_nested_predictions(
             logits_to_save = []
             for example in examples:
                 example = copy.deepcopy(example)
-                example.pop("word_start_chars")
-                example.pop("word_end_chars")
+                example.pop("word_start_chars", None)
+                example.pop("word_end_chars", None)
                 gold_ner = set()
-                for entity_type, start_char, end_char in zip(
-                    example["entity_types"], example["entity_start_chars"], example["entity_end_chars"]):
+                entity_types, entity_start_chars, entity_end_chars = _get_example_entities(example, default_entity_type)
+                for entity_type, start_char, end_char in zip(entity_types, entity_start_chars, entity_end_chars):
                     gold_ner.add((start_char, end_char, entity_type, example["text"][start_char:end_char]))
-                example.pop("entity_types")
-                example.pop("entity_start_chars")
-                example.pop("entity_end_chars")
+                example.pop("entity_types", None)
+                example.pop("entity_start_chars", None)
+                example.pop("entity_end_chars", None)
+                example.pop("label", None)
 
                 pred_ner = example_id_to_all_predictions.get(example["id"], set())
                 example["gold_ner"] = sorted(gold_ner)

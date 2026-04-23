@@ -115,7 +115,7 @@ class Binder(PreTrainedModel):
             hidden_dropout_prob=config.hidden_dropout_prob,
         )
         self.hf_config = hf_config
-        self.config.pruned_heads = hf_config.pruned_heads
+        self.config.pruned_heads = getattr(hf_config, "pruned_heads", {})
         self.dropout = torch.nn.Dropout(hf_config.hidden_dropout_prob)
         self.type_start_linear = torch.nn.Linear(hf_config.hidden_size, config.linear_size)
         self.type_end_linear = torch.nn.Linear(hf_config.hidden_size, config.linear_size)

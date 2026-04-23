@@ -1,4 +1,5 @@
 import logging
+import inspect
 from typing import Any, List, Dict, Union, Optional
 from dataclasses import dataclass
 
@@ -143,6 +144,9 @@ class BinderDataCollator:
 
 class BinderTrainer(Trainer):
     def __init__(self, *args, eval_examples=None, post_process_function=None, **kwargs):
+        trainer_init_signature = inspect.signature(Trainer.__init__)
+        if "tokenizer" in kwargs and "tokenizer" not in trainer_init_signature.parameters:
+            kwargs["processing_class"] = kwargs.pop("tokenizer")
         super().__init__(*args, **kwargs)
         self.eval_examples = eval_examples
         self.post_process_function = post_process_function
@@ -160,7 +164,7 @@ class BinderTrainer(Trainer):
                 "The batch received was empty, your model won't be able to train on it. Double-check that your "
                 f"training dataset contains keys expected by the model: {','.join(self._signature_columns)}."
             )
-        if self.args.past_index >= 0 and self._past is not None:
+        if getattr(self.args, "past_index", -1) >= 0 and self._past is not None:
             inputs["mems"] = self._past
 
         return inputs

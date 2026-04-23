@@ -5,8 +5,9 @@ Fine-tune Binder for named entity recognition.
 import logging
 import os
 import sys
+import json
 from dataclasses import dataclass, field
-from typing import Optional, List
+from typing import Optional, List, Tuple, Set
 
 import faulthandler
 faulthandler.enable()
@@ -34,6 +35,89 @@ from src import utils as postprocess_utils
 
 
 logger = logging.getLogger(__name__)
+
+
+def _validate_json_data_file(path: str, arg_name: str) -> None:
+    extension = path.split(".")[-1].lower()
+    assert extension in {"json", "jsonl"}, f"`{arg_name}` should be a json/jsonl file."
+
+
+def _dataset_loader_extension(path: str) -> str:
+    extension = path.split(".")[-1].lower()
+    if extension in {"json", "jsonl"}:
+        return "json"
+    return extension
+
+
+def _load_and_normalize_json_args(json_file: str) -> dict:
+    with open(json_file, "r", encoding="utf-8") as handle:
+        data = json.load(handle)
+
+    config_dir = os.path.dirname(json_file)
+    training_arg_fields = getattr(TrainingArguments, "__dataclass_fields__", {})
+
+    for path_key in [
+        "train_file",
+        "validation_file",
+        "test_file",
+        "entity_type_file",
+        "output_dir",
+        "cache_dir",
+        "logging_dir",
+        "binder_model_name_or_path",
+        "config_name",
+        "tokenizer_name",
+        "model_name_or_path",
+    ]:
+        value = data.get(path_key)
+        if not isinstance(value, str) or value == "":
+            continue
+        if os.path.isabs(value):
+            continue
+        # Keep remote model ids like DeepPavlov/rubert-base-cased intact.
+        if "/" in value and not any(sep in value for sep in ("./", ".\\", "../", "..\\")):
+            continue
+        data[path_key] = os.path.abspath(os.path.join(config_dir, value))
+
+    # transformers>=5 renamed evaluation_strategy -> eval_strategy
+    if "evaluation_strategy" in data and "eval_strategy" in training_arg_fields and "eval_strategy" not in data:
+        data["eval_strategy"] = data.pop("evaluation_strategy")
+
+    return data
+
+
+def _find_text_token_bounds(sequence_ids: List[Optional[int]], input_ids: List[int]) -> Tuple[int, int]:
+    text_start_index = 0
+    while sequence_ids[text_start_index] != 0:
+        text_start_index += 1
+
+    text_end_index = len(input_ids) - 1
+    while sequence_ids[text_end_index] != 0:
+        text_end_index -= 1
+
+    return text_start_index, text_end_index
+
+
+def _char_span_to_token_span(
+    offsets: List[Tuple[int, int]],
+    text_start_index: int,
+    text_end_index: int,
+    start_char: int,
+    end_char: int,
+) -> Optional[Tuple[int, int]]:
+    if offsets[text_start_index][0] > start_char or offsets[text_end_index][1] < end_char:
+        return None
+
+    start_token_index, end_token_index = text_start_index, text_end_index
+    while start_token_index <= text_end_index and offsets[start_token_index][0] <= start_char:
+        start_token_index += 1
+    start_token_index -= 1
+
+    while offsets[end_token_index][1] >= end_char:
+        end_token_index -= 1
+    end_token_index += 1
+
+    return start_token_index, end_token_index
 
 
 def load_tokenizer_with_fallback(model_name_or_path, cache_dir=None, use_fast=False, **kwargs):
@@ -242,6 +326,14 @@ class DataTrainingArguments:
             "help": "The maximum length of an entity span."
         },
     )
+    restrict_to_candidate_spans: bool = field(
+        default=False,
+        metadata={"help": "If true, training/eval/predict only considers spans listed in candidate_spans_field."},
+    )
+    candidate_spans_field: Optional[str] = field(
+        default=None,
+        metadata={"help": "Field containing candidate spans as [start_char, end_char] pairs."},
+    )
     entity_type_file: str = field(
         default=None,
         metadata={"help": "The entity type file contains all entity type names, descriptions, etc."},
@@ -281,14 +373,11 @@ class DataTrainingArguments:
             raise ValueError("Need either a dataset name or a training/validation file/test_file.")
         else:
             if self.train_file is not None:
-                extension = self.train_file.split(".")[-1]
-                assert extension == "json", "`train_file` should be a json file."
+                _validate_json_data_file(self.train_file, "train_file")
             if self.validation_file is not None:
-                extension = self.validation_file.split(".")[-1]
-                assert extension == "json", "`validation_file` should be a json file."
+                _validate_json_data_file(self.validation_file, "validation_file")
             if self.test_file is not None:
-                extension = self.test_file.split(".")[-1]
-                assert extension == "json", "`test_file` should be a json file."
+                _validate_json_data_file(self.test_file, "test_file")
 
 
 def main():
@@ -297,12 +386,22 @@ def main():
     # We now keep distinct sets of args, for a cleaner separation of concerns.
 
     parser = HfArgumentParser((ModelArguments, DataTrainingArguments, TrainingArguments))
+    normalized_args = None
     if sys.argv[-1].endswith(".json"):
         # If we pass only one argument to the script and it's the path to a json file,
         # let's parse it to get our arguments.
-        model_args, data_args, training_args = parser.parse_json_file(json_file=os.path.abspath(sys.argv[-1]))
+        json_file = os.path.abspath(sys.argv[-1])
+        normalized_args = _load_and_normalize_json_args(json_file)
+        model_args, data_args, training_args = parser.parse_dict(normalized_args, allow_extra_keys=True)
     else:
         model_args, data_args, training_args = parser.parse_args_into_dataclasses()
+
+    if not hasattr(training_args, "overwrite_output_dir"):
+        setattr(
+            training_args,
+            "overwrite_output_dir",
+            bool(normalized_args.get("overwrite_output_dir", False)) if normalized_args is not None else False,
+        )
 
     # Setup env variables and logging
     os.environ["WANDB_PROJECT"] = data_args.wandb_project or data_args.dataset_name
@@ -360,14 +459,14 @@ def main():
     data_files = {}
     if data_args.train_file is not None:
         data_files["train"] = data_args.train_file
-        extension = data_args.train_file.split(".")[-1]
+        extension = _dataset_loader_extension(data_args.train_file)
 
     if data_args.validation_file is not None:
         data_files["validation"] = data_args.validation_file
-        extension = data_args.validation_file.split(".")[-1]
+        extension = _dataset_loader_extension(data_args.validation_file)
     if data_args.test_file is not None:
         data_files["test"] = data_args.test_file
-        extension = data_args.test_file.split(".")[-1]
+        extension = _dataset_loader_extension(data_args.test_file)
     raw_datasets = load_dataset(extension, data_files=data_files, cache_dir=model_args.cache_dir)
     # See more about loading any type of standard or custom dataset (from files, python dict, pandas DataFrame, etc) at
     # https://huggingface.co/docs/datasets/loading_datasets.html.
@@ -435,6 +534,81 @@ def main():
 
     entity_type_id_to_str = [et[data_args.entity_type_key_field] for et in entity_type_knowledge]
     entity_type_str_to_id = {t: i for i, t in enumerate(entity_type_id_to_str)}
+    default_entity_type = (
+        data_args.dataset_entity_types[0] if len(data_args.dataset_entity_types) > 0 else entity_type_id_to_str[0]
+    )
+
+    def get_example_entities(examples, sample_index):
+        if "entity_types" in examples and "entity_start_chars" in examples and "entity_end_chars" in examples:
+            return (
+                examples["entity_types"][sample_index],
+                examples["entity_start_chars"][sample_index],
+                examples["entity_end_chars"][sample_index],
+            )
+
+        raw_labels = examples.get("label")
+        if raw_labels is None:
+            return [], [], []
+
+        label_spans = raw_labels[sample_index]
+        entity_types = [default_entity_type for _ in label_spans]
+        entity_start_chars = [span[0] for span in label_spans]
+        entity_end_chars = [span[1] for span in label_spans]
+        return entity_types, entity_start_chars, entity_end_chars
+
+    def get_example_word_boundaries(examples, sample_index):
+        if "word_start_chars" in examples and "word_end_chars" in examples:
+            return examples["word_start_chars"][sample_index], examples["word_end_chars"][sample_index]
+
+        boundary_spans = []
+        if data_args.candidate_spans_field and data_args.candidate_spans_field in examples:
+            boundary_spans.extend(examples[data_args.candidate_spans_field][sample_index])
+
+        entity_types, entity_start_chars, entity_end_chars = get_example_entities(examples, sample_index)
+        boundary_spans.extend(zip(entity_start_chars, entity_end_chars))
+
+        word_start_chars = sorted({span[0] for span in boundary_spans})
+        word_end_chars = sorted({span[1] for span in boundary_spans})
+        return word_start_chars, word_end_chars
+
+    def get_candidate_char_spans(examples, sample_index) -> Optional[Set[Tuple[int, int]]]:
+        if not data_args.restrict_to_candidate_spans:
+            return None
+        if not data_args.candidate_spans_field or data_args.candidate_spans_field not in examples:
+            return None
+        return {tuple(span) for span in examples[data_args.candidate_spans_field][sample_index]}
+
+    def build_candidate_masks(offsets, sequence_ids, input_ids, examples, sample_index):
+        text_start_index, text_end_index = _find_text_token_bounds(sequence_ids, input_ids)
+        candidate_char_spans = get_candidate_char_spans(examples, sample_index)
+        if not candidate_char_spans:
+            return None, None, None
+
+        seq_len = len(offsets)
+        candidate_start_mask = [0] * seq_len
+        candidate_end_mask = [0] * seq_len
+        candidate_span_mask = [[0] * seq_len for _ in range(seq_len)]
+
+        for start_char, end_char in candidate_char_spans:
+            token_span = _char_span_to_token_span(
+                offsets=offsets,
+                text_start_index=text_start_index,
+                text_end_index=text_end_index,
+                start_char=start_char,
+                end_char=end_char,
+            )
+            if token_span is None:
+                continue
+
+            start_token_index, end_token_index = token_span
+            if end_token_index - start_token_index + 1 > data_args.max_span_length:
+                continue
+
+            candidate_start_mask[start_token_index] = 1
+            candidate_end_mask[end_token_index] = 1
+            candidate_span_mask[start_token_index][end_token_index] = 1
+
+        return candidate_start_mask, candidate_end_mask, candidate_span_mask
 
     def prepare_type_features(examples):
         tokenized_examples = tokenizer(
@@ -491,6 +665,7 @@ def main():
             "attention_mask": [],
             "token_start_mask": [],
             "token_end_mask": [],
+            "candidate_span_mask": [],
             "ner": [],
         }
         # RoBERTa doesn't need token_type_ids.
@@ -503,16 +678,7 @@ def main():
 
             # Grab the sequence corresponding to that example (to know what is the text and what are special tokens).
             sequence_ids = tokenized_examples.sequence_ids(i)
-
-            # Start token index of the current text.
-            text_start_index = 0
-            while sequence_ids[text_start_index] != 0:
-                text_start_index += 1
-
-            # End token index of the current text.
-            text_end_index = len(input_ids) - 1
-            while sequence_ids[text_end_index] != 0:
-                text_end_index -= 1
+            text_start_index, text_end_index = _find_text_token_bounds(sequence_ids, input_ids)
 
             # One example can give several spans, this is the index of the example containing this span of text.
             sample_index = sample_mapping[i]
@@ -520,8 +686,7 @@ def main():
             # Create token_start_mask and token_end_mask where mask = 1 if the corresponding token is either a start
             # or an end of a word in the original dataset.
             token_start_mask, token_end_mask = [], []
-            word_start_chars = examples["word_start_chars"][sample_index]
-            word_end_chars = examples["word_end_chars"][sample_index]
+            word_start_chars, word_end_chars = get_example_word_boundaries(examples, sample_index)
             for index, (start_char, end_char) in enumerate(offsets):
                 if sequence_ids[index] != 0:
                     token_start_mask.append(0)
@@ -530,12 +695,24 @@ def main():
                     token_start_mask.append(int(start_char in word_start_chars))
                     token_end_mask.append(int(end_char in word_end_chars))
 
-            default_span_mask = [
-                [
-                    (j - i >= 0) * s * e for j, e in enumerate(token_end_mask)
+            candidate_start_mask, candidate_end_mask, candidate_span_mask = build_candidate_masks(
+                offsets=offsets,
+                sequence_ids=sequence_ids,
+                input_ids=input_ids,
+                examples=examples,
+                sample_index=sample_index,
+            )
+            if data_args.restrict_to_candidate_spans and candidate_span_mask is not None:
+                token_start_mask = candidate_start_mask
+                token_end_mask = candidate_end_mask
+                default_span_mask = candidate_span_mask
+            else:
+                default_span_mask = [
+                    [
+                        (j - i >= 0) * s * e for j, e in enumerate(token_end_mask)
+                    ]
+                    for i, s in enumerate(token_start_mask)
                 ]
-                for i, s in enumerate(token_start_mask)
-            ]
 
             start_negative_mask = [token_start_mask[:] for _ in entity_type_id_to_str]
             end_negative_mask = [token_end_mask[:] for _ in entity_type_id_to_str]
@@ -544,23 +721,23 @@ def main():
             # We convert NER into a list of (type_id, start_index, end_index) tuples.
             tokenized_ner_annotations = []
 
-            entity_types = examples["entity_types"][sample_index]
-            entity_start_chars = examples["entity_start_chars"][sample_index]
-            entity_end_chars = examples["entity_end_chars"][sample_index]
+            entity_types, entity_start_chars, entity_end_chars = get_example_entities(examples, sample_index)
+            candidate_char_spans = get_candidate_char_spans(examples, sample_index)
             assert len(entity_types) == len(entity_start_chars) == len(entity_end_chars)
             for entity_type, start_char, end_char in zip(entity_types, entity_start_chars, entity_end_chars):
-                # Detect if the span is in the text.
-                if offsets[text_start_index][0] <= start_char and offsets[text_end_index][1] >= end_char:
-                    start_token_index, end_token_index = text_start_index, text_end_index
-                    # Move the start_token_index and end_token_index to the two ends of the span.
-                    # Note: we could go after the last offset if the span is the last word (edge case).
-                    while start_token_index <= text_end_index and offsets[start_token_index][0] <= start_char:
-                        start_token_index += 1
-                    start_token_index -= 1
+                if candidate_char_spans is not None and (start_char, end_char) not in candidate_char_spans:
+                    continue
 
-                    while offsets[end_token_index][1] >= end_char:
-                        end_token_index -= 1
-                    end_token_index += 1
+                # Detect if the span is in the text.
+                token_span = _char_span_to_token_span(
+                    offsets=offsets,
+                    text_start_index=text_start_index,
+                    text_end_index=text_end_index,
+                    start_char=start_char,
+                    end_char=end_char,
+                )
+                if token_span is not None:
+                    start_token_index, end_token_index = token_span
 
                     entity_type_id = entity_type_str_to_id[entity_type]
 
@@ -586,6 +763,7 @@ def main():
             processed_examples["attention_mask"].append(tokenized_examples["attention_mask"][i])
             processed_examples["token_start_mask"].append(token_start_mask)
             processed_examples["token_end_mask"].append(token_end_mask)
+            processed_examples["candidate_span_mask"].append(default_span_mask)
 
             processed_examples["ner"].append({
                 "annotations": tokenized_ner_annotations,
@@ -659,6 +837,7 @@ def main():
         tokenized_examples["example_id"] = []
         tokenized_examples["token_start_mask"] = []
         tokenized_examples["token_end_mask"] = []
+        tokenized_examples["candidate_span_mask"] = []
 
         for i in range(len(tokenized_examples["input_ids"])):
             tokenized_examples["split"].append(split)
@@ -673,8 +852,7 @@ def main():
             # Create token_start_mask and token_end_mask where mask = 1 if the corresponding token is either a start
             # or an end of a word in the original dataset.
             token_start_mask, token_end_mask = [], []
-            word_start_chars = examples["word_start_chars"][sample_index]
-            word_end_chars = examples["word_end_chars"][sample_index]
+            word_start_chars, word_end_chars = get_example_word_boundaries(examples, sample_index)
             for index, (start_char, end_char) in enumerate(tokenized_examples["offset_mapping"][i]):
                 if sequence_ids[index] != 0:
                     token_start_mask.append(0)
@@ -682,6 +860,26 @@ def main():
                 else:
                     token_start_mask.append(int(start_char in word_start_chars))
                     token_end_mask.append(int(end_char in word_end_chars))
+
+            candidate_start_mask, candidate_end_mask, candidate_span_mask = build_candidate_masks(
+                offsets=tokenized_examples["offset_mapping"][i],
+                sequence_ids=sequence_ids,
+                input_ids=tokenized_examples["input_ids"][i],
+                examples=examples,
+                sample_index=sample_index,
+            )
+            if data_args.restrict_to_candidate_spans and candidate_span_mask is not None:
+                token_start_mask = candidate_start_mask
+                token_end_mask = candidate_end_mask
+                tokenized_examples["candidate_span_mask"].append(candidate_span_mask)
+            else:
+                default_span_mask = [
+                    [
+                        (j - idx >= 0) * s * e for j, e in enumerate(token_end_mask)
+                    ]
+                    for idx, s in enumerate(token_start_mask)
+                ]
+                tokenized_examples["candidate_span_mask"].append(default_span_mask)
 
             tokenized_examples["token_start_mask"].append(token_start_mask)
             tokenized_examples["token_end_mask"].append(token_end_mask)
