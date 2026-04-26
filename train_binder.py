@@ -123,6 +123,7 @@ class BinderTraining:
         
         # Training components (required)
         self.train_dataset = None
+        self.train_examples = None
         
         # Validation components (optional)
         self.eval_dataset = None
@@ -136,6 +137,8 @@ class BinderTraining:
         self.entity_type_id_to_str = None
         self.entity_type_str_to_id = None
         self.max_seq_length = None
+        self._raw_train_data = None
+        self._raw_eval_data = None
         
     def _get_safe_num_workers(self, requested_workers: Optional[int]) -> int:
         """
@@ -315,6 +318,28 @@ class BinderTraining:
             data_files={"train": self.data_args.train_file}, 
             cache_dir=self.model_args.cache_dir
         )["train"]
+
+        if self.data_args.validation_file is None and self.data_args.validation_split_ratio is not None:
+            logger.info(
+                "Creating validation split from train_file with ratio=%s and seed=%s",
+                self.data_args.validation_split_ratio,
+                self.data_args.validation_split_seed,
+            )
+            split_dataset = train_data.train_test_split(
+                test_size=self.data_args.validation_split_ratio,
+                seed=self.data_args.validation_split_seed,
+            )
+            train_data = split_dataset["train"]
+            self._raw_eval_data = split_dataset["test"]
+            logger.info(
+                "Created internal split: train=%s examples, validation=%s examples",
+                len(train_data),
+                len(self._raw_eval_data),
+            )
+        else:
+            self._raw_eval_data = None
+
+        self._raw_train_data = train_data
         
         logger.info(f"Loaded {len(train_data)} raw training examples")
         
@@ -489,6 +514,7 @@ class BinderTraining:
             )
         
         logger.info("Dataset preprocessing completed!")
+        self.train_examples = train_data
         
         # Add detailed logging about the training dataset
         logger.info(f"Training dataset prepared with {len(self.train_dataset)} examples")
@@ -516,16 +542,20 @@ class BinderTraining:
 
     def prepare_validation_dataset(self):
         """Prepares the validation dataset (optional)."""
-        if self.data_args.validation_file is None:
-            logger.info("No validation file specified, skipping validation dataset preparation")
-            return
-        
-        # Load validation data
-        eval_data = load_dataset(
-            "json", 
-            data_files={"validation": self.data_args.validation_file}, 
-            cache_dir=self.model_args.cache_dir
-        )["validation"]
+        if self._raw_eval_data is not None:
+            eval_data = self._raw_eval_data
+            logger.info("Using validation split derived from train_file")
+        else:
+            if self.data_args.validation_file is None:
+                logger.info("No validation file specified, skipping validation dataset preparation")
+                return
+            
+            # Load validation data
+            eval_data = load_dataset(
+                "json", 
+                data_files={"validation": self.data_args.validation_file}, 
+                cache_dir=self.model_args.cache_dir
+            )["validation"]
         
         if self.data_args.max_eval_samples is not None:
             eval_data = eval_data.select(range(self.data_args.max_eval_samples))

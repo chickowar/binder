@@ -269,6 +269,18 @@ class DataTrainingArguments:
         default=None,
         metadata={"help": "An optional input evaluation data file to evaluate the perplexity on (a text file)."},
     )
+    validation_split_ratio: Optional[float] = field(
+        default=None,
+        metadata={
+            "help": "If set and validation_file is not provided, create a validation split from train_file with this ratio."
+        },
+    )
+    validation_split_seed: Optional[int] = field(
+        default=42,
+        metadata={
+            "help": "Random seed used when creating a validation split from train_file."
+        },
+    )
     test_file: Optional[str] = field(
         default=None,
         metadata={"help": "An optional input test data file to evaluate the perplexity on (a text file)."},
@@ -378,6 +390,10 @@ class DataTrainingArguments:
                 _validate_json_data_file(self.validation_file, "validation_file")
             if self.test_file is not None:
                 _validate_json_data_file(self.test_file, "test_file")
+            if self.validation_split_ratio is not None and not (0.0 < self.validation_split_ratio < 1.0):
+                raise ValueError("validation_split_ratio must be in the open interval (0, 1).")
+            if self.validation_file is not None and self.validation_split_ratio is not None:
+                raise ValueError("Use either validation_file or validation_split_ratio, not both.")
 
 
 def main():
@@ -468,6 +484,28 @@ def main():
         data_files["test"] = data_args.test_file
         extension = _dataset_loader_extension(data_args.test_file)
     raw_datasets = load_dataset(extension, data_files=data_files, cache_dir=model_args.cache_dir)
+    if (
+        data_args.validation_file is None
+        and data_args.validation_split_ratio is not None
+        and "train" in raw_datasets
+        and "validation" not in raw_datasets
+    ):
+        logger.info(
+            "Creating validation split from train_file with ratio=%s and seed=%s",
+            data_args.validation_split_ratio,
+            data_args.validation_split_seed,
+        )
+        split_datasets = raw_datasets["train"].train_test_split(
+            test_size=data_args.validation_split_ratio,
+            seed=data_args.validation_split_seed,
+        )
+        raw_datasets["train"] = split_datasets["train"]
+        raw_datasets["validation"] = split_datasets["test"]
+        logger.info(
+            "Created internal split: train=%s examples, validation=%s examples",
+            len(raw_datasets["train"]),
+            len(raw_datasets["validation"]),
+        )
     # See more about loading any type of standard or custom dataset (from files, python dict, pandas DataFrame, etc) at
     # https://huggingface.co/docs/datasets/loading_datasets.html.
 

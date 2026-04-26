@@ -103,6 +103,28 @@ class BinderModelOutput(ModelOutput):
 
 
 class Binder(PreTrainedModel):
+    @staticmethod
+    def _resolve_dropout_prob(hf_config, fallback: float) -> float:
+        hidden_dropout_prob = getattr(hf_config, "hidden_dropout_prob", None)
+        if hidden_dropout_prob is not None:
+            return hidden_dropout_prob
+        return fallback
+
+    @staticmethod
+    def _load_encoder(pretrained_model_name_or_path: str, hf_config):
+        try:
+            return AutoModel.from_pretrained(
+                pretrained_model_name_or_path,
+                config=hf_config,
+                add_pooling_layer=False,
+            )
+        except TypeError as exc:
+            if "add_pooling_layer" not in str(exc):
+                raise
+            return AutoModel.from_pretrained(
+                pretrained_model_name_or_path,
+                config=hf_config,
+            )
 
     def __init__(self, config):
         super().__init__(config)
@@ -112,11 +134,13 @@ class Binder(PreTrainedModel):
             cache_dir=config.cache_dir,
             revision=config.revision,
             use_auth_token=config.use_auth_token,
-            hidden_dropout_prob=config.hidden_dropout_prob,
         )
         self.hf_config = hf_config
         self.config.pruned_heads = getattr(hf_config, "pruned_heads", {})
-        self.dropout = torch.nn.Dropout(hf_config.hidden_dropout_prob)
+        if hasattr(hf_config, "hidden_dropout_prob"):
+            hf_config.hidden_dropout_prob = config.hidden_dropout_prob
+        dropout_prob = self._resolve_dropout_prob(hf_config, config.hidden_dropout_prob)
+        self.dropout = torch.nn.Dropout(dropout_prob)
         self.type_start_linear = torch.nn.Linear(hf_config.hidden_size, config.linear_size)
         self.type_end_linear = torch.nn.Linear(hf_config.hidden_size, config.linear_size)
         self.type_span_linear = torch.nn.Linear(hf_config.hidden_size, config.linear_size)
@@ -141,16 +165,8 @@ class Binder(PreTrainedModel):
         # Initialize weights and apply final processing
         self.post_init()
 
-        self.text_encoder = AutoModel.from_pretrained(
-            config.pretrained_model_name_or_path,
-            config=hf_config,
-            add_pooling_layer=False
-        )
-        self.type_encoder = AutoModel.from_pretrained(
-            config.pretrained_model_name_or_path,
-            config=hf_config,
-            add_pooling_layer=False
-        )
+        self.text_encoder = self._load_encoder(config.pretrained_model_name_or_path, hf_config)
+        self.type_encoder = self._load_encoder(config.pretrained_model_name_or_path, hf_config)
 
     def _init_weights(self, module):
         """Initialize the weights"""
@@ -260,6 +276,7 @@ class Binder(PreTrainedModel):
                 range_vector = torch.LongTensor(seq_length, device=sequence_output.device).fill_(1).cumsum(0) - 1
             
             span_width = range_vector.unsqueeze(0) - range_vector.unsqueeze(1) + 1
+            span_width = span_width.clamp(min=0, max=self.width_embeddings.num_embeddings - 1)
             # seq_length x seq_length x hidden_size
             span_width_embeddings = self.width_embeddings(span_width * (span_width > 0))
             span_output = torch.cat([
