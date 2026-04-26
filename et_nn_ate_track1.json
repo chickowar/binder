@@ -1,1 +1,6 @@
-{"dataset": "CL-RuTerm3-track1", "name": "TERM", "description": "научный термин, специальное слово или терминологическое словосочетание из текста научной статьи", "description_source": "NN_ATE track1 prompt"}
+{
+  "dataset": "CL-RuTerm3-track1",
+  "name": "TERM",
+  "description": "научный термин, специальное слово или терминологическое словосочетание из текста научной статьи",
+  "description_source": "NN_ATE track1 prompt"
+}
