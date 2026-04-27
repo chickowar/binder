@@ -184,7 +184,7 @@ class Binder(PreTrainedModel):
             module.bias.data.zero_()
             module.weight.data.fill_(1.0)
 
-    def gradient_checkpointing_enable(self):
+    def gradient_checkpointing_enable(self, gradient_checkpointing_kwargs=None):
         self.text_encoder.gradient_checkpointing_enable()
         self.type_encoder.gradient_checkpointing_enable()
 
