@@ -998,6 +998,16 @@ def main():
 
         return metrics
 
+    callbacks = []
+    if training_args.do_eval and "validation" in raw_datasets:
+        callbacks.append(EarlyStoppingCallback(early_stopping_patience=20))
+    else:
+        training_args.evaluation_strategy = "no"
+        training_args.eval_steps = None
+        training_args.eval_delay = 0
+        training_args.load_best_model_at_end = False
+        training_args.metric_for_best_model = None
+
     # Initialize our Trainer
     trainer = BinderTrainer(
         model=model,
@@ -1007,7 +1017,7 @@ def main():
         eval_examples=eval_examples if training_args.do_eval else None,
         tokenizer=tokenizer,
         data_collator=data_collator,
-        callbacks=[EarlyStoppingCallback(early_stopping_patience=20)],
+        callbacks=callbacks,
         post_process_function=post_processing_function,
         compute_metrics=None,
     )
