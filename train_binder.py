@@ -154,8 +154,8 @@ class BinderTraining:
         
         # If user explicitly requested workers, respect it but with safety limits
         if platform.system() == "Windows":
-            # On Windows, limit to 2 workers max to prevent thread exhaustion
-            safe_workers = min(requested_workers, 2)
+            # Keep a conservative cap on Windows, but allow moderate parallelism.
+            safe_workers = min(requested_workers, 4)
             if safe_workers != requested_workers:
                 logger.warning(
                     f"⚠️ Reducing preprocessing workers from {requested_workers} to {safe_workers} "
