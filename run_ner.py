@@ -539,7 +539,12 @@ def main():
         threshold_loss_weight=model_args.threshold_loss_weight,
         ner_loss_weight=model_args.ner_loss_weight,
     )
-    model = Binder(config)
+    if model_args.binder_model_name_or_path:
+        logger.info("Loading Binder weights from %s", model_args.binder_model_name_or_path)
+        model = Binder.from_pretrained(model_args.binder_model_name_or_path, config=config)
+    else:
+        logger.info("Initializing a fresh Binder model")
+        model = Binder(config)
 
     # Tokenizer check: this script requires a fast tokenizer.
     if not isinstance(tokenizer, PreTrainedTokenizerFast):
