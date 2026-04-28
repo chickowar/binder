@@ -16,6 +16,8 @@ os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 import datasets
 from datasets import load_dataset
+import torch
+from safetensors.torch import load_file as safe_load_file
 
 import transformers
 from transformers import (
@@ -78,6 +80,21 @@ def _load_and_normalize_json_args(json_file: str) -> dict:
         if "/" in value and not any(sep in value for sep in ("./", ".\\", "../", "..\\")):
             continue
         data[path_key] = os.path.abspath(os.path.join(config_dir, value))
+
+
+def _load_binder_checkpoint_state_dict(model_dir: str) -> dict:
+    safetensors_path = os.path.join(model_dir, "model.safetensors")
+    pytorch_bin_path = os.path.join(model_dir, "pytorch_model.bin")
+
+    if os.path.isfile(safetensors_path):
+        return safe_load_file(safetensors_path)
+    if os.path.isfile(pytorch_bin_path):
+        return torch.load(pytorch_bin_path, map_location="cpu")
+
+    raise FileNotFoundError(
+        f"No Binder checkpoint weights found in {model_dir}. "
+        "Expected model.safetensors or pytorch_model.bin."
+    )
 
     # transformers>=5 renamed evaluation_strategy -> eval_strategy
     if "evaluation_strategy" in data and "eval_strategy" in training_arg_fields and "eval_strategy" not in data:
@@ -541,7 +558,13 @@ def main():
     )
     if model_args.binder_model_name_or_path:
         logger.info("Loading Binder weights from %s", model_args.binder_model_name_or_path)
-        model = Binder.from_pretrained(model_args.binder_model_name_or_path, config=config)
+        model = Binder(config)
+        state_dict = _load_binder_checkpoint_state_dict(model_args.binder_model_name_or_path)
+        load_result = model.load_state_dict(state_dict, strict=False)
+        if load_result.missing_keys:
+            logger.warning("Missing Binder keys while loading checkpoint: %s", load_result.missing_keys)
+        if load_result.unexpected_keys:
+            logger.warning("Unexpected Binder keys while loading checkpoint: %s", load_result.unexpected_keys)
     else:
         logger.info("Initializing a fresh Binder model")
         model = Binder(config)
