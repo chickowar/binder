@@ -81,6 +81,12 @@ def _load_and_normalize_json_args(json_file: str) -> dict:
             continue
         data[path_key] = os.path.abspath(os.path.join(config_dir, value))
 
+    # transformers>=5 renamed evaluation_strategy -> eval_strategy
+    if "evaluation_strategy" in data and "eval_strategy" in training_arg_fields and "eval_strategy" not in data:
+        data["eval_strategy"] = data.pop("evaluation_strategy")
+
+    return data
+
 
 def _load_binder_checkpoint_state_dict(model_dir: str) -> dict:
     safetensors_path = os.path.join(model_dir, "model.safetensors")
@@ -95,12 +101,6 @@ def _load_binder_checkpoint_state_dict(model_dir: str) -> dict:
         f"No Binder checkpoint weights found in {model_dir}. "
         "Expected model.safetensors or pytorch_model.bin."
     )
-
-    # transformers>=5 renamed evaluation_strategy -> eval_strategy
-    if "evaluation_strategy" in data and "eval_strategy" in training_arg_fields and "eval_strategy" not in data:
-        data["eval_strategy"] = data.pop("evaluation_strategy")
-
-    return data
 
 
 def _find_text_token_bounds(sequence_ids: List[Optional[int]], input_ids: List[int]) -> Tuple[int, int]:
