@@ -44,7 +44,7 @@
   "save_strategy": "steps",
   "save_steps": 100,
   "save_total_limit": 1,
-  "save_only_model": true,
+  "save_only_model": false,
   "evaluation_strategy": "steps",
   "eval_steps": 100
 }
