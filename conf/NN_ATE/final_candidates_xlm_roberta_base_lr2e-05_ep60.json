@@ -5,7 +5,7 @@
   "model_name_or_path": "FacebookAI/xlm-roberta-base",
   "train_file": "../../../../data/CL-RuTerm3/processed/train_t1_candidates.jsonl",
   "validation_file": "../../../../data/CL-RuTerm3/processed/test1_t1_candidates.jsonl",
-  "entity_type_file": "../../et_nn_ate_track1_specific_common_nomen.json",
+  "entity_type_file": "../../et_nn_ate_track1_specific_common_nomen_NOBOM.json",
   "dataset_entity_types": [
     "TERM"
   ],
