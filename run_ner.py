@@ -34,9 +34,11 @@ from src.config import BinderConfig
 from src.model import Binder
 from src.trainer import BinderDataCollator, BinderTrainer
 from src import utils as postprocess_utils
+from term_datasets.text_processing import TextProcessor
 
 
 logger = logging.getLogger(__name__)
+TEXT_PROCESSOR = TextProcessor()
 
 
 def _validate_json_data_file(path: str, arg_name: str) -> None:
@@ -355,6 +357,10 @@ class DataTrainingArguments:
             "help": "The maximum length of an entity span."
         },
     )
+    max_words_per_ngram: Optional[int] = field(
+        default=None,
+        metadata={"help": "If set, generate candidate spans locally as all n-grams up to this many words."},
+    )
     restrict_to_candidate_spans: bool = field(
         default=False,
         metadata={"help": "If true, training/eval/predict only considers spans listed in candidate_spans_field."},
@@ -604,6 +610,16 @@ def main():
         data_args.dataset_entity_types[0] if len(data_args.dataset_entity_types) > 0 else entity_type_id_to_str[0]
     )
 
+    def build_generated_ngram_spans(examples, sample_index):
+        if data_args.max_words_per_ngram is None:
+            return []
+        text = examples["text"][sample_index]
+        return [
+            (span.start, span.end)
+            for sentence in TEXT_PROCESSOR.split_sentences(text)
+            for span in TEXT_PROCESSOR.extract_ngrams(sentence, max_n=data_args.max_words_per_ngram)
+        ]
+
     def get_example_entities(examples, sample_index):
         if "entity_types" in examples and "entity_start_chars" in examples and "entity_end_chars" in examples:
             return (
@@ -629,6 +645,8 @@ def main():
         boundary_spans = []
         if data_args.candidate_spans_field and data_args.candidate_spans_field in examples:
             boundary_spans.extend(examples[data_args.candidate_spans_field][sample_index])
+        elif data_args.max_words_per_ngram is not None:
+            boundary_spans.extend(build_generated_ngram_spans(examples, sample_index))
 
         entity_types, entity_start_chars, entity_end_chars = get_example_entities(examples, sample_index)
         boundary_spans.extend(zip(entity_start_chars, entity_end_chars))
@@ -640,9 +658,12 @@ def main():
     def get_candidate_char_spans(examples, sample_index) -> Optional[Set[Tuple[int, int]]]:
         if not data_args.restrict_to_candidate_spans:
             return None
-        if not data_args.candidate_spans_field or data_args.candidate_spans_field not in examples:
+        if data_args.candidate_spans_field and data_args.candidate_spans_field in examples:
+            return {tuple(span) for span in examples[data_args.candidate_spans_field][sample_index]}
+        generated_spans = build_generated_ngram_spans(examples, sample_index)
+        if not generated_spans:
             return None
-        return {tuple(span) for span in examples[data_args.candidate_spans_field][sample_index]}
+        return set(generated_spans)
 
     def build_candidate_masks(offsets, sequence_ids, input_ids, examples, sample_index):
         text_start_index, text_end_index = _find_text_token_bounds(sequence_ids, input_ids)
