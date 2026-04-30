@@ -1,5 +1,5 @@
 {
-  "run_name": "binder-final-lr2e-05-msl192-bs1-ga8-ep60-seed38",
+  "run_name": "binder-final-lr2e-05-msl128-bs1-ga8-ep60-seed38",
   "seed": 38,
   "dataset_name": "CL-RuTerm3-track1",
   "model_name_or_path": "FacebookAI/xlm-roberta-base",
@@ -10,8 +10,8 @@
     "TERM"
   ],
   "report_to": "tensorboard",
-  "output_dir": "./logs/Kaggle/track1/candidates/final/ruroberta-base/lr2e-05-msl192-bs1-ga8-ep60-seed38",
-  "max_seq_length": 192,
+  "output_dir": "./logs/Kaggle/track1/candidates/final/ruroberta-base/lr2e-05-msl128-bs1-ga8-ep60-seed38",
+  "max_seq_length": 128,
   "max_span_length": 8,
   "restrict_to_candidate_spans": true,
   "candidate_spans_field": "candidates",
